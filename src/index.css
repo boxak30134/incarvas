@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    font-family: 'Pretendard Variable', 'Pretendard', 'Apple SD Gothic Neo', 'Noto Sans KR', system-ui, -apple-system, sans-serif;
+  }
+}
+
+.slide-canvas-surface {
+  touch-action: none;
+  overscroll-behavior: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.slide-pattern-grid {
+  background-image:
+    linear-gradient(to right, rgba(148, 163, 184, 0.16) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(148, 163, 184, 0.16) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+.slide-pattern-dots {
+  background-image: radial-gradient(rgba(148, 163, 184, 0.35) 1.25px, transparent 1.25px);
+  background-size: 20px 20px;
+}
+
+.slide-pattern-lined {
+  background-image: linear-gradient(to bottom, transparent 27px, rgba(148, 163, 184, 0.2) 28px);
+  background-size: 100% 28px;
+}

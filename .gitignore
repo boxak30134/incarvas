@@ -1,0 +1,4 @@
+vibe-context/
+.env*
+node_modules/
+dist/
