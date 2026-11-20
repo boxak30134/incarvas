@@ -184,7 +184,7 @@ export const useDeckStore = create<DeckState>()(
       future: [],
 
       aiProvider: 'google',
-      aiModelId: 'gemini-3.8-flash',
+      aiModelId: 'gemini-3-flash-preview',
       aiMessages: [],
       aiStatus: 'idle',
       aiStatusDetail: '',

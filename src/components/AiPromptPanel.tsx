@@ -122,12 +122,18 @@ export const AiPromptPanel: React.FC<AiPromptPanelProps> = ({
     activeAbortController = controller;
 
     try {
-      const snapshot = await renderSlideToDataUrl(activeSlide, {
-        scale: 0.7,
-        mimeType: 'image/jpeg',
-        quality: 0.72,
-        includeInk: true,
-      });
+      const needsVisualSnapshot =
+        activeSlide.strokes.length > 0 ||
+        activeSlide.elements.some((el) => el.type === 'image');
+
+      const snapshot = needsVisualSnapshot
+        ? await renderSlideToDataUrl(activeSlide, {
+            scale: 0.5,
+            mimeType: 'image/jpeg',
+            quality: 0.65,
+            includeInk: true,
+          })
+        : '';
 
       const priorMessages = useDeckStore
         .getState()
@@ -163,6 +169,10 @@ export const AiPromptPanel: React.FC<AiPromptPanelProps> = ({
           displayBody =
             '⚠️ AI 응답이 중간에 끊겼거나 슬라이드 디자인 형식(JSON)으로 완성되지 않아 적용하지 못했습니다. 상단 [다시 시도]를 눌러 다시 요청해 주세요.';
         }
+      }
+
+      if (result.modelUsed && result.modelUsed !== aiModelId) {
+        setAiModel(aiProvider, result.modelUsed);
       }
 
       updateAiMessageContent(assistantMsgId, displayBody, {
@@ -212,7 +222,7 @@ export const AiPromptPanel: React.FC<AiPromptPanelProps> = ({
   })();
 
   const estimatedInputTokens = Math.min(1800, 450 + activeSlide.elements.length * 45 + prompt.length);
-  const maxOutTokens = mode === 'design' ? 8192 : 2048;
+  const maxOutTokens = mode === 'design' ? 4096 : 1500;
   const localDiag = diagnoseSlideLocal(activeSlide);
 
   return (

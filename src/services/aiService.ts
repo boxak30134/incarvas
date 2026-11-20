@@ -18,16 +18,30 @@ import {
   sanitizeLogMessage,
 } from './cryptoStorage';
 
-const FIRST_CHUNK_TIMEOUT_MS = 12_000;
-const CHUNK_GAP_TIMEOUT_MS = 20_000;
-const TOTAL_REQUEST_BUDGET_MS = 90_000;
+const FIRST_CHUNK_TIMEOUT_MS = 9_000;
+const CHUNK_GAP_TIMEOUT_MS = 12_000;
+const TOTAL_REQUEST_BUDGET_MS = 45_000;
 
 export const AI_MODEL_OPTIONS: AiModelOption[] = [
+  {
+    id: 'gemini-3-flash-preview',
+    provider: 'google',
+    label: 'Gemini 3 Flash',
+    description: '빠른 응답·시각 레이아웃 이해 (기본 권장)',
+    tokenBadge: '저비용 · 고속',
+  },
+  {
+    id: 'gemini-3.1-flash-lite-preview',
+    provider: 'google',
+    label: 'Gemini 3.1 Flash-Lite',
+    description: '초경량 고속 응답·무료 티어 절약형',
+    tokenBadge: '초저비용 · 고속',
+  },
   {
     id: 'gemini-3.8-flash',
     provider: 'google',
     label: 'Gemini 3.8 Flash',
-    description: '최신 고속 추론·시각 레이아웃 이해 (기본 권장)',
+    description: '고정밀 추론·복합 레이아웃 설계',
     tokenBadge: '중간 · 무료 티어 가능',
   },
   {
@@ -36,20 +50,6 @@ export const AI_MODEL_OPTIONS: AiModelOption[] = [
     label: 'Gemini 3.6 Flash',
     description: '안정적인 슬라이드 디자인·피드백 생성',
     tokenBadge: '저비용 · 빠름',
-  },
-  {
-    id: 'gemini-3-flash-preview',
-    provider: 'google',
-    label: 'Gemini 3 Flash Preview',
-    description: '차세대 멀티모달 미리보기 폴백 모델',
-    tokenBadge: '저비용',
-  },
-  {
-    id: 'gemini-3.1-flash-lite-preview',
-    provider: 'google',
-    label: 'Gemini 3.1 Flash-Lite',
-    description: '초경량 고속 응답·무료 티어 절약형',
-    tokenBadge: '초저비용 · 고속',
   },
   {
     id: 'gpt-4o-mini',
@@ -75,11 +75,13 @@ export const AI_MODEL_OPTIONS: AiModelOption[] = [
 ];
 
 const GEMINI_FALLBACK_CHAIN = [
-  'gemini-3.8-flash',
-  'gemini-3.6-flash',
   'gemini-3-flash-preview',
   'gemini-3.1-flash-lite-preview',
+  'gemini-3.8-flash',
+  'gemini-3.6-flash',
 ];
+
+let lastWorkingGeminiModel: string | null = null;
 
 class EmptyStreamError extends Error {
   constructor() {
@@ -573,21 +575,30 @@ function strOr(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.trim() ? value : fallback;
 }
 
-async function probeStreamFirstChunk<T>(
-  iterable: AsyncIterable<T>,
-  signal: AbortSignal,
+async function openAndProbeGeminiStream<T>(
+  openStream: () => Promise<AsyncIterable<T>>,
+  parentSignal: AbortSignal,
+  attemptController: AbortController,
 ): Promise<{ first: T; iterator: AsyncIterator<T> }> {
-  const iterator = iterable[Symbol.asyncIterator]();
-  const firstResult = await withTimeout(
-    iterator.next(),
-    FIRST_CHUNK_TIMEOUT_MS,
-    signal,
-    '첫 응답 대기',
-  );
-  if (firstResult.done) {
-    throw new EmptyStreamError();
+  try {
+    return await withTimeout(
+      (async () => {
+        const stream = await openStream();
+        const iterator = stream[Symbol.asyncIterator]();
+        const firstResult = await iterator.next();
+        if (firstResult.done) {
+          throw new EmptyStreamError();
+        }
+        return { first: firstResult.value, iterator };
+      })(),
+      FIRST_CHUNK_TIMEOUT_MS,
+      parentSignal,
+      '첫 응답 대기',
+    );
+  } catch (err) {
+    attemptController.abort();
+    throw err;
   }
-  return { first: firstResult.value, iterator };
 }
 
 export interface RunAiParams {
@@ -632,7 +643,9 @@ export async function runSlideAiRequest(params: RunAiParams): Promise<AiRunResul
   }
 
   const budgetController = new AbortController();
+  let budgetTimedOut = false;
   const budgetTimer = window.setTimeout(() => {
+    budgetTimedOut = true;
     budgetController.abort();
   }, TOTAL_REQUEST_BUDGET_MS);
   const onParentAbort = () => budgetController.abort();
@@ -666,10 +679,13 @@ export async function runSlideAiRequest(params: RunAiParams): Promise<AiRunResul
     const systemInstruction = buildSystemInstruction(mode);
 
     if (provider === 'google') {
-      const candidateModels = [
-        modelId,
-        ...GEMINI_FALLBACK_CHAIN.filter((m) => m !== modelId),
-      ];
+      const candidateModels = Array.from(
+        new Set([
+          modelId,
+          ...(lastWorkingGeminiModel ? [lastWorkingGeminiModel] : []),
+          ...GEMINI_FALLBACK_CHAIN,
+        ]),
+      );
       return await runGeminiWithFallback({
         apiKey,
         models: candidateModels,
@@ -726,6 +742,11 @@ export async function runSlideAiRequest(params: RunAiParams): Promise<AiRunResul
         mode === 'design' ? parseDesignPatchFromResponse(text, slide) : undefined,
     };
   } catch (err) {
+    if (budgetTimedOut && !signal.aborted) {
+      throw new Error(
+        'AI 서버 응답 시간이 초과되었습니다(45초). 잠시 후 [다시 시도]를 눌러 주세요.',
+      );
+    }
     const safeMsg = sanitizeLogMessage(
       err instanceof Error ? err.message : String(err),
       [apiKey],
@@ -773,7 +794,13 @@ async function runGeminiWithFallback(args: {
     onChunk,
   } = args;
 
-  const ai = new GoogleGenAI({ apiKey });
+  const ai = new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      retryOptions: { attempts: 1 },
+      timeout: FIRST_CHUNK_TIMEOUT_MS,
+    },
+  });
   const parts: Array<
     { text: string } | { inlineData: { mimeType: string; data: string } }
   > = [{ text: userContext }];
@@ -791,7 +818,7 @@ async function runGeminiWithFallback(args: {
 
   for (let mIdx = 0; mIdx < models.length; mIdx += 1) {
     const currentModel = models[mIdx];
-    const maxAttempts = 3;
+    const maxAttempts = 2;
     let useAdvancedConfig = true;
 
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
@@ -816,26 +843,39 @@ async function runGeminiWithFallback(args: {
         }
       };
 
-      try {
-        const stream = await ai.models.generateContentStream({
-          model: currentModel,
-          contents: [{ role: 'user', parts }],
-          config: {
-            systemInstruction,
-            maxOutputTokens: mode === 'design' ? 8192 : 2048,
-            temperature: mode === 'design' ? 0.5 : 0.4,
-            ...(useAdvancedConfig
-              ? {
-                  thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-                  ...(mode === 'design'
-                    ? { responseMimeType: 'application/json' }
-                    : {}),
-                }
-              : {}),
-          },
-        });
+      const attemptController = new AbortController();
+      const onAttemptParentAbort = () => attemptController.abort();
+      signal.addEventListener('abort', onAttemptParentAbort, { once: true });
 
-        const { first, iterator } = await probeStreamFirstChunk(stream, signal);
+      try {
+        const { first, iterator } = await openAndProbeGeminiStream(
+          () =>
+            ai.models.generateContentStream({
+              model: currentModel,
+              contents: [{ role: 'user', parts }],
+              config: {
+                systemInstruction,
+                maxOutputTokens: mode === 'design' ? 4096 : 1500,
+                temperature: mode === 'design' ? 0.5 : 0.4,
+                abortSignal: attemptController.signal,
+                httpOptions: {
+                  retryOptions: { attempts: 1 },
+                  timeout: FIRST_CHUNK_TIMEOUT_MS,
+                },
+                ...(useAdvancedConfig
+                  ? {
+                      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+                      ...(mode === 'design'
+                        ? { responseMimeType: 'application/json' }
+                        : {}),
+                    }
+                  : {}),
+              },
+            }),
+          signal,
+          attemptController,
+        );
+
         onStatus('streaming', currentModel);
 
         if (first.candidates?.[0]?.finishReason) {
@@ -881,6 +921,7 @@ async function runGeminiWithFallback(args: {
           throw new EmptyStreamError();
         }
 
+        lastWorkingGeminiModel = currentModel;
         onStatus('done', currentModel);
         return {
           text: accumulatedText,
@@ -888,6 +929,7 @@ async function runGeminiWithFallback(args: {
           designPatch,
         };
       } catch (err) {
+        attemptController.abort();
         lastError = err;
         const kind = classifyError(err);
 
@@ -896,9 +938,16 @@ async function runGeminiWithFallback(args: {
           throw err;
         }
 
-        if (kind === 'fatal-request' && useAdvancedConfig) {
-          useAdvancedConfig = false;
-          continue;
+        if (!signal.aborted && err instanceof TimeoutError && accumulatedText.trim().length === 0) {
+          break;
+        }
+
+        if (kind === 'fatal-request') {
+          if (useAdvancedConfig) {
+            useAdvancedConfig = false;
+            continue;
+          }
+          break;
         }
 
         if (accumulatedText.trim().length > 0) {
@@ -908,11 +957,15 @@ async function runGeminiWithFallback(args: {
               : undefined;
           if (mode === 'design' && !partialPatch) {
             if (attempt < maxAttempts - 1) {
-              await sleepWithAbort(computeBackoffMs(attempt), signal);
+              await sleepWithAbort(
+                Math.min(1500, computeBackoffMs(attempt, parseRetryAfterMs(err))),
+                signal,
+              );
               continue;
             }
             break;
           }
+          lastWorkingGeminiModel = currentModel;
           onStatus('done', currentModel);
           const partialWithNotice = `${accumulatedText}\n\n*(네트워크 지연으로 스트림이 조기 종료되어 수신된 내용까지만 표시했습니다.)*`;
           return {
@@ -927,19 +980,18 @@ async function runGeminiWithFallback(args: {
             'API 키 인증에 실패했습니다(401/403). 무료 티어 한도 또는 키 유효성을 확인해 주세요.',
           );
         }
-        if (kind === 'fatal-request') {
-          throw err;
-        }
         if (kind === 'fatal-model') {
           break;
         }
 
         if (attempt < maxAttempts - 1) {
           await sleepWithAbort(
-            computeBackoffMs(attempt, parseRetryAfterMs(err)),
+            Math.min(1500, computeBackoffMs(attempt, parseRetryAfterMs(err))),
             signal,
           );
         }
+      } finally {
+        signal.removeEventListener('abort', onAttemptParentAbort);
       }
     }
   }
