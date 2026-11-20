@@ -64,8 +64,11 @@ export const AiPromptPanel: React.FC<AiPromptPanelProps> = ({
   const applyAiDesignPatch = useDeckStore((s) => s.applyAiDesignPatch);
   const undo = useDeckStore((s) => s.undo);
   const pastCount = useDeckStore((s) => s.past.length);
+  const selectedElementIds = useDeckStore((s) => s.selectedElementIds);
+  const setSelectedElementIds = useDeckStore((s) => s.setSelectedElementIds);
 
   const [mode, setMode] = useState<AiRequestMode>('design');
+  const [scopeMode, setScopeMode] = useState<'selected' | 'all'>('selected');
   const [prompt, setPrompt] = useState('');
   const [customModel, setCustomModel] = useState('');
   const [showCustomModel, setShowCustomModel] = useState(false);
@@ -88,6 +91,12 @@ export const AiPromptPanel: React.FC<AiPromptPanelProps> = ({
   useEffect(() => {
     listEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [aiMessages.length]);
+
+  useEffect(() => {
+    if (selectedElementIds.length > 0) {
+      setScopeMode('selected');
+    }
+  }, [selectedElementIds.length]);
 
   const activeSlide =
     deck.slides.find((s) => s.id === activeSlideId) ?? deck.slides[0];
@@ -140,12 +149,19 @@ export const AiPromptPanel: React.FC<AiPromptPanelProps> = ({
         .aiMessages.slice(0, -2)
         .filter((m) => !m.content.startsWith('⚠️'));
 
+      const isScoped =
+        mode === 'design' &&
+        selectedElementIds.length > 0 &&
+        scopeMode === 'selected';
+      const scopedIds = isScoped ? selectedElementIds : undefined;
+
       const result = await runSlideAiRequest({
         provider: aiProvider,
         modelId: aiModelId,
         mode,
         prompt: text,
         slide: activeSlide,
+        targetElementIds: scopedIds,
         deckOutline: mode === 'feedback' ? buildDeckOutline(deck.slides) : undefined,
         slideSnapshotDataUrl: snapshot || undefined,
         history: priorMessages,
@@ -161,9 +177,11 @@ export const AiPromptPanel: React.FC<AiPromptPanelProps> = ({
 
       if (mode === 'design') {
         if (result.designPatch) {
-          applyAiDesignPatch(result.designPatch);
+          applyAiDesignPatch(result.designPatch, scopedIds);
           appliedDesign = true;
-          displayBody = `${result.designPatch.explanation}\n\n✅ 현재 슬라이드에 AI 디자인이 적용되었습니다. (마음에 들지 않으면 상단 [실행 취소]로 되돌릴 수 있습니다.)`;
+          displayBody = isScoped
+            ? `${result.designPatch.explanation}\n\n✅ 선택된 요소(${scopedIds?.length ?? 0}개)에 한정하여 AI 디자인이 적용되었습니다. (상단 [실행 취소]로 되돌릴 수 있습니다.)`
+            : `${result.designPatch.explanation}\n\n✅ 현재 슬라이드에 AI 디자인이 적용되었습니다. (마음에 들지 않으면 상단 [실행 취소]로 되돌릴 수 있습니다.)`;
         } else {
           setAiStatus('error', '디자인 JSON 파싱 실패');
           displayBody =
@@ -395,6 +413,42 @@ export const AiPromptPanel: React.FC<AiPromptPanelProps> = ({
           </span>
         )}
       </div>
+
+      {mode === 'design' && selectedElementIds.length > 0 && (
+        <div className="mx-3 mt-2 flex flex-wrap items-center justify-between gap-1.5 rounded-xl border border-blue-200 bg-blue-50/70 px-2.5 py-2 text-[11px]">
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setScopeMode('selected')}
+              className={`rounded-md px-2 py-1 font-semibold transition ${
+                scopeMode === 'selected'
+                  ? 'bg-blue-600 text-white shadow-2xs'
+                  : 'bg-white text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              🎯 선택 요소만 ({selectedElementIds.length}개)
+            </button>
+            <button
+              type="button"
+              onClick={() => setScopeMode('all')}
+              className={`rounded-md px-2 py-1 font-semibold transition ${
+                scopeMode === 'all'
+                  ? 'bg-blue-600 text-white shadow-2xs'
+                  : 'bg-white text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              🖼️ 슬라이드 전체
+            </button>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSelectedElementIds([])}
+            className="text-[11px] font-medium text-slate-500 hover:text-slate-800"
+          >
+            선택 해제
+          </button>
+        </div>
+      )}
 
       {/* 7단계 상태 배너 */}
       {aiStatus !== 'idle' && (

@@ -26,18 +26,33 @@ interface DragState {
   origY: number;
   origW: number;
   origH: number;
+  origPositions: Record<string, { x: number; y: number; w: number; h: number }>;
   snapshot: DeckDocument;
+}
+
+interface MarqueeBox {
+  startX: number;
+  startY: number;
+  curX: number;
+  curY: number;
 }
 
 export const SlideCanvas: React.FC = () => {
   const deck = useDeckStore((s) => s.deck);
   const activeSlideId = useDeckStore((s) => s.activeSlideId);
-  const selectedElementId = useDeckStore((s) => s.selectedElementId);
+  const selectedElementIds = useDeckStore((s) => s.selectedElementIds);
   const activeTool = useDeckStore((s) => s.activeTool);
   const penColor = useDeckStore((s) => s.penColor);
   const penWidth = useDeckStore((s) => s.penWidth);
 
   const setSelectedElementId = useDeckStore((s) => s.setSelectedElementId);
+  const setSelectedElementIds = useDeckStore((s) => s.setSelectedElementIds);
+  const toggleSelectedElementId = useDeckStore(
+    (s) => s.toggleSelectedElementId,
+  );
+  const deleteSelectedElements = useDeckStore(
+    (s) => s.deleteSelectedElements,
+  );
   const updateElement = useDeckStore((s) => s.updateElement);
   const commitSnapshotForUndo = useDeckStore((s) => s.commitSnapshotForUndo);
   const deleteElement = useDeckStore((s) => s.deleteElement);
@@ -54,6 +69,9 @@ export const SlideCanvas: React.FC = () => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [scale, setScale] = useState(0.8);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [marquee, setMarquee] = useState<MarqueeBox | null>(null);
+  const marqueePointerIdRef = useRef<number | null>(null);
+  const marqueeBaseIdsRef = useRef<string[]>([]);
   const dragRef = useRef<DragState | null>(null);
 
   useEffect(() => {
@@ -92,17 +110,39 @@ export const SlideCanvas: React.FC = () => {
     setEditingId(null);
   }, [activeSlideId]);
 
-  const selectedElement = activeSlide.elements.find(
-    (el) => el.id === selectedElementId,
-  );
+  const selectedElement =
+    selectedElementIds.length === 1
+      ? activeSlide.elements.find((el) => el.id === selectedElementIds[0])
+      : undefined;
+
+  const toSlideCoords = (
+    el: HTMLDivElement,
+    clientX: number,
+    clientY: number,
+  ) => {
+    const rect = el.getBoundingClientRect();
+    const x = Math.max(
+      0,
+      Math.min(SLIDE_WIDTH, ((clientX - rect.left) / rect.width) * SLIDE_WIDTH),
+    );
+    const y = Math.max(
+      0,
+      Math.min(SLIDE_HEIGHT, ((clientY - rect.top) / rect.height) * SLIDE_HEIGHT),
+    );
+    return { x, y };
+  };
 
   const handleCanvasBackgroundClick = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.target !== e.currentTarget) return;
     setEditingId(null);
 
-    const rect = e.currentTarget.getBoundingClientRect();
-    const x = Math.round(((e.clientX - rect.left) / rect.width) * SLIDE_WIDTH);
-    const y = Math.round(((e.clientY - rect.top) / rect.height) * SLIDE_HEIGHT);
+    const { x: rawX, y: rawY } = toSlideCoords(
+      e.currentTarget,
+      e.clientX,
+      e.clientY,
+    );
+    const x = Math.round(rawX);
+    const y = Math.round(rawY);
 
     if (activeTool === 'text') {
       addTextElement(Math.min(x, SLIDE_WIDTH - 240), Math.min(y, SLIDE_HEIGHT - 80));
@@ -126,7 +166,57 @@ export const SlideCanvas: React.FC = () => {
       addTableElement(3, 3);
       return;
     }
-    setSelectedElementId(null);
+
+    if (activeTool === 'select') {
+      e.currentTarget.setPointerCapture(e.pointerId);
+      marqueePointerIdRef.current = e.pointerId;
+      const baseIds = e.shiftKey ? selectedElementIds : [];
+      marqueeBaseIdsRef.current = baseIds;
+      if (!e.shiftKey) {
+        setSelectedElementIds([]);
+      }
+      setMarquee({ startX: rawX, startY: rawY, curX: rawX, curY: rawY });
+    } else {
+      setSelectedElementId(null);
+    }
+  };
+
+  const handleCanvasPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (marqueePointerIdRef.current !== e.pointerId || !marquee) return;
+    const { x, y } = toSlideCoords(e.currentTarget, e.clientX, e.clientY);
+    const nextMarquee: MarqueeBox = {
+      ...marquee,
+      curX: x,
+      curY: y,
+    };
+    setMarquee(nextMarquee);
+
+    const dist = Math.hypot(x - marquee.startX, y - marquee.startY);
+    if (dist > 6) {
+      const minX = Math.min(nextMarquee.startX, nextMarquee.curX);
+      const maxX = Math.max(nextMarquee.startX, nextMarquee.curX);
+      const minY = Math.min(nextMarquee.startY, nextMarquee.curY);
+      const maxY = Math.max(nextMarquee.startY, nextMarquee.curY);
+      const hitIds = activeSlide.elements
+        .filter(
+          (el) =>
+            el.x < maxX &&
+            el.x + el.w > minX &&
+            el.y < maxY &&
+            el.y + el.h > minY,
+        )
+        .map((el) => el.id);
+      setSelectedElementIds([...marqueeBaseIdsRef.current, ...hitIds]);
+    }
+  };
+
+  const handleCanvasPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (marqueePointerIdRef.current !== e.pointerId) return;
+    marqueePointerIdRef.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    setMarquee(null);
   };
 
   const startDrag = (
@@ -136,7 +226,32 @@ export const SlideCanvas: React.FC = () => {
   ) => {
     if (activeTool !== 'select' || editingId === el.id) return;
     e.stopPropagation();
-    setSelectedElementId(el.id);
+
+    if (e.shiftKey && mode === 'move') {
+      toggleSelectedElementId(el.id);
+      return;
+    }
+
+    const activeSelection =
+      mode === 'move' && selectedElementIds.includes(el.id)
+        ? selectedElementIds
+        : [el.id];
+
+    if (!selectedElementIds.includes(el.id) || mode === 'resize') {
+      setSelectedElementIds([el.id]);
+    }
+
+    const origPositions: DragState['origPositions'] = {};
+    for (const item of activeSlide.elements) {
+      if (activeSelection.includes(item.id)) {
+        origPositions[item.id] = {
+          x: item.x,
+          y: item.y,
+          w: item.w,
+          h: item.h,
+        };
+      }
+    }
 
     const target = e.currentTarget as HTMLElement;
     target.setPointerCapture(e.pointerId);
@@ -150,6 +265,7 @@ export const SlideCanvas: React.FC = () => {
       origY: el.y,
       origW: el.w,
       origH: el.h,
+      origPositions,
       snapshot: structuredClone(useDeckStore.getState().deck),
     };
   };
@@ -163,9 +279,19 @@ export const SlideCanvas: React.FC = () => {
     const dy = (e.clientY - drag.startClientY) / scale;
 
     if (drag.mode === 'move') {
-      const nx = Math.max(0, Math.min(SLIDE_WIDTH - drag.origW, drag.origX + dx));
-      const ny = Math.max(0, Math.min(SLIDE_HEIGHT - drag.origH, drag.origY + dy));
-      updateElement(drag.elementId, { x: Math.round(nx), y: Math.round(ny) }, false);
+      const ids = Object.keys(drag.origPositions);
+      if (ids.length > 1) {
+        for (const id of ids) {
+          const orig = drag.origPositions[id];
+          const nx = Math.max(0, Math.min(SLIDE_WIDTH - orig.w, orig.x + dx));
+          const ny = Math.max(0, Math.min(SLIDE_HEIGHT - orig.h, orig.y + dy));
+          updateElement(id, { x: Math.round(nx), y: Math.round(ny) }, false);
+        }
+      } else {
+        const nx = Math.max(0, Math.min(SLIDE_WIDTH - drag.origW, drag.origX + dx));
+        const ny = Math.max(0, Math.min(SLIDE_HEIGHT - drag.origH, drag.origY + dy));
+        updateElement(drag.elementId, { x: Math.round(nx), y: Math.round(ny) }, false);
+      }
     } else {
       const nw = Math.max(48, Math.min(SLIDE_WIDTH - drag.origX, drag.origW + dx));
       const nh = Math.max(32, Math.min(SLIDE_HEIGHT - drag.origY, drag.origH + dy));
@@ -202,7 +328,33 @@ export const SlideCanvas: React.FC = () => {
     <div className="flex min-w-0 flex-1 flex-col bg-slate-100">
       {/* 선택된 요소 속성 바 (호버 없이 상시 노출) */}
       <div className="flex min-h-11 flex-wrap items-center gap-2 border-b border-slate-200 bg-white px-3 py-1.5 text-xs">
-        {selectedElement ? (
+        {selectedElementIds.length > 1 ? (
+          <>
+            <span className="rounded bg-blue-50 px-2 py-0.5 font-semibold text-blue-700">
+              선택된 요소 {selectedElementIds.length}개
+            </span>
+            <span className="text-slate-600">
+              드래그로 다중 이동하거나 AI 패널에서 선택 요소만 디자인할 수 있습니다.
+            </span>
+            <div className="ml-auto flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setSelectedElementIds([])}
+                className="rounded-lg border border-slate-300 bg-white px-2.5 py-1 font-medium text-slate-700 hover:bg-slate-50"
+              >
+                선택 해제
+              </button>
+              <button
+                type="button"
+                onClick={deleteSelectedElements}
+                className="inline-flex items-center gap-1 rounded-lg bg-rose-50 px-2.5 py-1 font-medium text-rose-700 hover:bg-rose-100"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                일괄 삭제
+              </button>
+            </div>
+          </>
+        ) : selectedElement ? (
           <>
             <span className="rounded bg-blue-50 px-2 py-0.5 font-semibold text-blue-700">
               {selectedElement.type === 'text'
@@ -338,7 +490,7 @@ export const SlideCanvas: React.FC = () => {
           </>
         ) : (
           <span className="text-slate-500">
-            요소를 클릭해 드래그/크기 조절하거나, 더블 클릭(더블 탭)해 텍스트를 수정하세요. 펜 도구로 스케치도 가능합니다.
+            마우스·S-Pen 드래그(또는 Shift+클릭)로 여러 요소를 선택해 AI 디자인을 한정 적용할 수 있습니다.
           </span>
         )}
       </div>
@@ -357,6 +509,9 @@ export const SlideCanvas: React.FC = () => {
         >
           <div
             onPointerDown={handleCanvasBackgroundClick}
+            onPointerMove={handleCanvasPointerMove}
+            onPointerUp={handleCanvasPointerUp}
+            onPointerCancel={handleCanvasPointerUp}
             className={`slide-canvas-surface relative origin-top-left overflow-hidden ${patternClass}`}
             style={{
               width: SLIDE_WIDTH,
@@ -370,7 +525,7 @@ export const SlideCanvas: React.FC = () => {
               .slice()
               .sort((a, b) => a.zIndex - b.zIndex)
               .map((el) => {
-                const isSelected = el.id === selectedElementId;
+                const isSelected = selectedElementIds.includes(el.id);
                 const isEditing = el.id === editingId;
 
                 return (
@@ -483,19 +638,39 @@ export const SlideCanvas: React.FC = () => {
                       </table>
                     )}
 
-                    {isSelected && activeTool === 'select' && !isEditing && (
-                      <div
-                        data-overlay="resize-handle"
-                        onPointerDown={(e) => startDrag(e, el, 'resize')}
-                        onPointerMove={moveDrag}
-                        onPointerUp={endDrag}
-                        onPointerCancel={endDrag}
-                        className="absolute -right-2 -bottom-2 h-4 w-4 cursor-nwse-resize rounded-full border-2 border-white bg-blue-600 shadow"
-                      />
-                    )}
+                    {isSelected &&
+                      selectedElementIds.length === 1 &&
+                      activeTool === 'select' &&
+                      !isEditing && (
+                        <div
+                          data-overlay="resize-handle"
+                          onPointerDown={(e) => startDrag(e, el, 'resize')}
+                          onPointerMove={moveDrag}
+                          onPointerUp={endDrag}
+                          onPointerCancel={endDrag}
+                          className="absolute -right-2 -bottom-2 h-4 w-4 cursor-nwse-resize rounded-full border-2 border-white bg-blue-600 shadow"
+                        />
+                      )}
                   </div>
                 );
               })}
+
+            {marquee &&
+              Math.hypot(
+                marquee.curX - marquee.startX,
+                marquee.curY - marquee.startY,
+              ) > 6 && (
+                <div
+                  className="pointer-events-none absolute border-2 border-dashed border-blue-600 bg-blue-500/10"
+                  style={{
+                    left: Math.min(marquee.startX, marquee.curX),
+                    top: Math.min(marquee.startY, marquee.curY),
+                    width: Math.abs(marquee.curX - marquee.startX),
+                    height: Math.abs(marquee.curY - marquee.startY),
+                    zIndex: 40,
+                  }}
+                />
+              )}
 
             <StylusOverlay
               slideId={activeSlide.id}

@@ -96,6 +96,7 @@ interface DeckState {
   hydrated: boolean;
   activeSlideId: string;
   selectedElementId: string | null;
+  selectedElementIds: string[];
   activeTool: EditorTool;
   penColor: string;
   penWidth: number;
@@ -120,6 +121,9 @@ interface DeckState {
   setPenColor: (color: string) => void;
   setPenWidth: (width: number) => void;
   setSelectedElementId: (id: string | null) => void;
+  setSelectedElementIds: (ids: string[]) => void;
+  toggleSelectedElementId: (id: string) => void;
+  deleteSelectedElements: () => void;
 
   addTextElement: (x?: number, y?: number) => void;
   addShapeElement: (shapeKind: ShapeKind, x?: number, y?: number) => void;
@@ -139,11 +143,14 @@ interface DeckState {
   eraseStrokesByIds: (strokeIds: string[]) => void;
   clearSlideInk: () => void;
 
-  applyAiDesignPatch: (patch: {
-    title?: string;
-    background?: Partial<SlideBackground>;
-    elements?: SlideElement[];
-  }) => void;
+  applyAiDesignPatch: (
+    patch: {
+      title?: string;
+      background?: Partial<SlideBackground>;
+      elements?: SlideElement[];
+    },
+    targetElementIds?: string[],
+  ) => void;
 
   undo: () => void;
   redo: () => void;
@@ -177,6 +184,7 @@ export const useDeckStore = create<DeckState>()(
       hydrated: false,
       activeSlideId: initialDeck.slides[0].id,
       selectedElementId: null,
+      selectedElementIds: [],
       activeTool: 'select',
       penColor: '#ef4444',
       penWidth: 3,
@@ -196,6 +204,7 @@ export const useDeckStore = create<DeckState>()(
             deck: stored,
             activeSlideId: stored.slides[0].id,
             selectedElementId: null,
+            selectedElementIds: [],
             hydrated: true,
           });
         } else {
@@ -225,11 +234,16 @@ export const useDeckStore = create<DeckState>()(
             ...pushHistory(state, normalized),
             activeSlideId: normalized.slides[0]?.id ?? '',
             selectedElementId: null,
+            selectedElementIds: [],
           };
         }),
 
       setActiveSlide: (slideId) =>
-        set({ activeSlideId: slideId, selectedElementId: null }),
+        set({
+          activeSlideId: slideId,
+          selectedElementId: null,
+          selectedElementIds: [],
+        }),
 
       addSlide: () =>
         set((state) => {
@@ -242,6 +256,7 @@ export const useDeckStore = create<DeckState>()(
             ...pushHistory(state, nextDeck),
             activeSlideId: newSlide.id,
             selectedElementId: null,
+            selectedElementIds: [],
           };
         }),
 
@@ -261,6 +276,7 @@ export const useDeckStore = create<DeckState>()(
             ...pushHistory(state, { ...state.deck, slides }),
             activeSlideId: copy.id,
             selectedElementId: null,
+            selectedElementIds: [],
           };
         }),
 
@@ -278,13 +294,53 @@ export const useDeckStore = create<DeckState>()(
             ...pushHistory(state, { ...state.deck, slides }),
             activeSlideId: nextActive,
             selectedElementId: null,
+            selectedElementIds: [],
           };
         }),
 
       setActiveTool: (tool) => set({ activeTool: tool }),
       setPenColor: (penColor) => set({ penColor }),
       setPenWidth: (penWidth) => set({ penWidth }),
-      setSelectedElementId: (selectedElementId) => set({ selectedElementId }),
+      setSelectedElementId: (selectedElementId) =>
+        set({
+          selectedElementId,
+          selectedElementIds: selectedElementId ? [selectedElementId] : [],
+        }),
+      setSelectedElementIds: (ids) => {
+        const unique = Array.from(new Set(ids));
+        set({
+          selectedElementIds: unique,
+          selectedElementId: unique[0] ?? null,
+        });
+      },
+      toggleSelectedElementId: (id) =>
+        set((state) => {
+          const exists = state.selectedElementIds.includes(id);
+          const next = exists
+            ? state.selectedElementIds.filter((item) => item !== id)
+            : [...state.selectedElementIds, id];
+          return {
+            selectedElementIds: next,
+            selectedElementId: next[0] ?? null,
+          };
+        }),
+      deleteSelectedElements: () =>
+        set((state) => {
+          if (state.selectedElementIds.length === 0) return state;
+          const removeSet = new Set(state.selectedElementIds);
+          const slides = state.deck.slides.map((s) => {
+            if (s.id !== state.activeSlideId) return s;
+            return {
+              ...s,
+              elements: s.elements.filter((el) => !removeSet.has(el.id)),
+            };
+          });
+          return {
+            ...pushHistory(state, { ...state.deck, slides }),
+            selectedElementId: null,
+            selectedElementIds: [],
+          };
+        }),
 
       addTextElement: (x = 120, y = 180) =>
         set((state) => {
@@ -312,6 +368,7 @@ export const useDeckStore = create<DeckState>()(
           return {
             ...pushHistory(state, { ...state.deck, slides }),
             selectedElementId: id,
+            selectedElementIds: [id],
             activeTool: 'select',
           };
         }),
@@ -343,6 +400,7 @@ export const useDeckStore = create<DeckState>()(
           return {
             ...pushHistory(state, { ...state.deck, slides }),
             selectedElementId: id,
+            selectedElementIds: [id],
             activeTool: 'select',
           };
         }),
@@ -370,6 +428,7 @@ export const useDeckStore = create<DeckState>()(
           return {
             ...pushHistory(state, { ...state.deck, slides }),
             selectedElementId: id,
+            selectedElementIds: [id],
             activeTool: 'select',
           };
         }),
@@ -405,6 +464,7 @@ export const useDeckStore = create<DeckState>()(
           return {
             ...pushHistory(state, { ...state.deck, slides }),
             selectedElementId: id,
+            selectedElementIds: [id],
             activeTool: 'select',
           };
         }),
@@ -450,11 +510,15 @@ export const useDeckStore = create<DeckState>()(
               elements: s.elements.filter((el) => el.id !== elementId),
             };
           });
+          const nextIds = state.selectedElementIds.filter(
+            (id) => id !== elementId,
+          );
           return {
             ...pushHistory(state, { ...state.deck, slides }),
+            selectedElementIds: nextIds,
             selectedElementId:
               state.selectedElementId === elementId
-                ? null
+                ? (nextIds[0] ?? null)
                 : state.selectedElementId,
           };
         }),
@@ -513,10 +577,41 @@ export const useDeckStore = create<DeckState>()(
           return pushHistory(state, { ...state.deck, slides });
         }),
 
-      applyAiDesignPatch: (patch) =>
+      applyAiDesignPatch: (patch, targetElementIds) =>
         set((state) => {
+          const isScoped =
+            Boolean(targetElementIds && targetElementIds.length > 0) &&
+            Boolean(patch.elements && patch.elements.length > 0);
+          let nextSelectedIds: string[] = [];
+
           const slides = state.deck.slides.map((s) => {
             if (s.id !== state.activeSlideId) return s;
+
+            if (isScoped && targetElementIds && patch.elements) {
+              const targetSet = new Set(targetElementIds);
+              const kept = s.elements.filter((el) => !targetSet.has(el.id));
+              const keptIds = new Set(kept.map((el) => el.id));
+              const maxZ = kept.reduce((m, e) => Math.max(m, e.zIndex), 0);
+
+              const normalizedNewElements = patch.elements.map((el, idx) => {
+                const uniqueId = keptIds.has(el.id)
+                  ? makeId('ai')
+                  : el.id;
+                keptIds.add(uniqueId);
+                return {
+                  ...el,
+                  id: uniqueId,
+                  zIndex: maxZ + idx + 1,
+                };
+              });
+
+              nextSelectedIds = normalizedNewElements.map((e) => e.id);
+              return {
+                ...s,
+                elements: [...kept, ...normalizedNewElements],
+              };
+            }
+
             const nextBg: SlideBackground = patch.background
               ? {
                   color: patch.background.color || s.background.color || '#ffffff',
@@ -533,7 +628,8 @@ export const useDeckStore = create<DeckState>()(
           });
           return {
             ...pushHistory(state, { ...state.deck, slides }),
-            selectedElementId: null,
+            selectedElementIds: nextSelectedIds,
+            selectedElementId: nextSelectedIds[0] ?? null,
           };
         }),
 
@@ -555,6 +651,7 @@ export const useDeckStore = create<DeckState>()(
               ? state.activeSlideId
               : prev.slides[0]?.id ?? '',
             selectedElementId: null,
+            selectedElementIds: [],
           };
         }),
 
@@ -576,6 +673,7 @@ export const useDeckStore = create<DeckState>()(
               ? state.activeSlideId
               : next.slides[0]?.id ?? '',
             selectedElementId: null,
+            selectedElementIds: [],
           };
         }),
 
