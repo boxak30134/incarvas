@@ -22,7 +22,6 @@ import {
 import {
   connectGoogleDrive,
   disconnectDriveAccount,
-  getStoredDriveClientId,
   getStoredDriveToken,
   listDriveDecks,
   loadDeckFromGoogleDrive,
@@ -62,7 +61,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   });
   const [aiNotice, setAiNotice] = useState('');
 
-  const [clientId, setClientId] = useState('');
   const [driveToken, setDriveToken] = useState('');
   const [driveFiles, setDriveFiles] = useState<DriveFileSummary[]>([]);
   const [driveStatus, setDriveStatus] = useState('');
@@ -79,11 +77,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     const cancelFocus = delayedModalFocus(firstInputRef.current);
 
     void (async () => {
-      const [g, o, a, cid, tok] = await Promise.all([
+      const [g, o, a, tok] = await Promise.all([
         loadSecret('ai:google'),
         loadSecret('ai:openai'),
         loadSecret('ai:anthropic'),
-        getStoredDriveClientId(),
         getStoredDriveToken(),
       ]);
       setSavedMasks({
@@ -91,7 +88,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         openai: maskApiKey(o),
         anthropic: maskApiKey(a),
       });
-      setClientId(cid);
       setDriveToken(tok);
       if (tok) {
         try {
@@ -135,7 +131,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setDriveBusy(true);
     setDriveStatus('');
     try {
-      const token = await connectGoogleDrive(clientId);
+      const token = await connectGoogleDrive();
       setDriveToken(token);
       const files = await listDriveDecks(token);
       setDriveFiles(files);
@@ -357,28 +353,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </p>
               </div>
 
-              <div>
-                <label className="mb-1 block font-semibold text-slate-700">
-                  Google OAuth 2.0 Web Client ID
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    ref={firstInputRef}
-                    type="text"
-                    value={clientId}
-                    onChange={(e) => setClientId(e.target.value)}
-                    placeholder="1234567890-xxxx.apps.googleusercontent.com"
-                    className="flex-1 rounded-lg border border-slate-300 px-3 py-1.5 text-xs outline-none focus:border-blue-500"
-                  />
-                  <button
-                    type="button"
-                    disabled={driveBusy}
-                    onClick={() => void handleDriveConnect()}
-                    className="rounded-lg bg-blue-600 px-3 py-1.5 font-semibold text-white hover:bg-blue-700 disabled:bg-slate-300"
-                  >
-                    {driveToken ? '재인증' : 'Google 연결'}
-                  </button>
+              <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-white p-3">
+                <div>
+                  <p className="font-semibold text-slate-800">
+                    {driveToken ? 'Google Drive 연결됨' : 'Google 계정 연결 필요'}
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-slate-500">
+                    {driveToken
+                      ? '저장·불러오기 또는 권한 재승인을 진행할 수 있습니다.'
+                      : '버튼을 누르면 Google Drive 접근 권한 허용 창이 열립니다.'}
+                  </p>
                 </div>
+                <button
+                  type="button"
+                  disabled={driveBusy}
+                  onClick={() => void handleDriveConnect()}
+                  className="shrink-0 rounded-lg bg-blue-600 px-3.5 py-2 font-semibold text-white hover:bg-blue-700 disabled:bg-slate-300"
+                >
+                  {driveToken ? '권한 다시 연결' : 'Google Drive 연결'}
+                </button>
               </div>
 
               {driveToken && (

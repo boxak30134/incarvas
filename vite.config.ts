@@ -24,6 +24,7 @@ export default defineConfig(({ mode }) => {
           theme_color: '#1e3a8a',
           background_color: '#f8fafc',
           display: 'standalone',
+          start_url: '/',
           orientation: 'any',
           icons: [
             {
@@ -36,6 +37,7 @@ export default defineConfig(({ mode }) => {
         },
         workbox: {
           globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
+          navigateFallbackDenylist: [/^\/oauth\/callback/],
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
         },
       }),

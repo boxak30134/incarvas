@@ -7,6 +7,14 @@ import {
 
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const DEFAULT_FOLDER_NAME = 'InCarvas_Presentations';
+const DEFAULT_GOOGLE_CLIENT_ID =
+  '930810249812-msru8p424hkja6hqrpin2m22i8oetnim.apps.googleusercontent.com';
+
+export function getGoogleClientId(): string {
+  return (
+    import.meta.env.VITE_GOOGLE_CLIENT_ID?.trim() || DEFAULT_GOOGLE_CLIENT_ID
+  );
+}
 
 export class SecurityBoundaryError extends Error {
   constructor(message: string) {
@@ -97,12 +105,13 @@ export async function disconnectDriveAccount(): Promise<void> {
   await deleteSecret('oauth:google-drive-folder-id');
 }
 
-export async function connectGoogleDrive(clientId: string): Promise<string> {
-  const trimmedId = clientId.trim();
-  if (!trimmedId) {
-    throw new Error('Google OAuth Client ID를 먼저 입력해 주세요.');
+export async function connectGoogleDrive(
+  overrideClientId?: string,
+): Promise<string> {
+  const clientId = overrideClientId?.trim() || getGoogleClientId();
+  if (!clientId) {
+    throw new Error('Google OAuth Client ID가 설정되지 않았습니다.');
   }
-  await saveDriveClientId(trimmedId);
   await loadGisScript();
 
   const oauth2 = window.google?.accounts?.oauth2;
@@ -112,7 +121,7 @@ export async function connectGoogleDrive(clientId: string): Promise<string> {
 
   const token = await new Promise<string>((resolve, reject) => {
     const client = oauth2.initTokenClient({
-      client_id: trimmedId,
+      client_id: clientId,
       scope: DRIVE_SCOPE,
       callback: (resp) => {
         if (resp.error || !resp.access_token) {
