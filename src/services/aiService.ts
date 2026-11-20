@@ -271,75 +271,121 @@ function computeBackoffMs(attempt: number, retryAfterMs?: number | null): number
   return Math.max(400, Math.round(base + jitter));
 }
 
-function summarizeSlideForPrompt(slide: Slide): string {
-  const clippedElements = slide.elements.slice(0, 24).map((el) => {
-    if (el.type === 'text') {
-      return {
-        id: el.id,
-        type: el.type,
-        x: Math.round(el.x),
-        y: Math.round(el.y),
-        w: Math.round(el.w),
-        h: Math.round(el.h),
-        text: el.text.slice(0, 180),
-        fontSize: el.fontSize,
-        color: el.color,
-        align: el.align,
-        bold: el.bold,
-      };
-    }
-    if (el.type === 'shape') {
-      return {
-        id: el.id,
-        type: el.type,
-        shapeKind: el.shapeKind,
-        x: Math.round(el.x),
-        y: Math.round(el.y),
-        w: Math.round(el.w),
-        h: Math.round(el.h),
-        fill: el.fill,
-        stroke: el.stroke,
-        text: el.text?.slice(0, 100),
-      };
-    }
-    if (el.type === 'table') {
-      return {
-        id: el.id,
-        type: el.type,
-        x: Math.round(el.x),
-        y: Math.round(el.y),
-        w: Math.round(el.w),
-        h: Math.round(el.h),
-        rows: el.rows.slice(0, 6).map((r) => r.slice(0, 5)),
-      };
-    }
+function serializeElementSummary(el: SlideElement) {
+  if (el.type === 'text') {
     return {
       id: el.id,
-      type: 'image',
+      type: el.type,
       x: Math.round(el.x),
       y: Math.round(el.y),
       w: Math.round(el.w),
       h: Math.round(el.h),
-      alt: el.alt ?? '이미지',
+      text: el.text.slice(0, 180),
+      fontSize: el.fontSize,
+      color: el.color,
+      align: el.align,
+      bold: el.bold,
     };
-  });
+  }
+  if (el.type === 'shape') {
+    return {
+      id: el.id,
+      type: el.type,
+      shapeKind: el.shapeKind,
+      x: Math.round(el.x),
+      y: Math.round(el.y),
+      w: Math.round(el.w),
+      h: Math.round(el.h),
+      fill: el.fill,
+      stroke: el.stroke,
+      text: el.text?.slice(0, 100),
+    };
+  }
+  if (el.type === 'table') {
+    return {
+      id: el.id,
+      type: el.type,
+      x: Math.round(el.x),
+      y: Math.round(el.y),
+      w: Math.round(el.w),
+      h: Math.round(el.h),
+      rows: el.rows.slice(0, 6).map((r) => r.slice(0, 5)),
+    };
+  }
+  return {
+    id: el.id,
+    type: 'image',
+    x: Math.round(el.x),
+    y: Math.round(el.y),
+    w: Math.round(el.w),
+    h: Math.round(el.h),
+    alt: el.alt ?? '이미지',
+  };
+}
+
+function summarizeScopedSlideForPrompt(
+  slide: Slide,
+  targetElementIds?: string[],
+): string {
+  if (targetElementIds && targetElementIds.length > 0) {
+    const targetSet = new Set(targetElementIds);
+    const targetElements = slide.elements
+      .filter((el) => targetSet.has(el.id))
+      .slice(0, 24);
+    const lockedElements = slide.elements
+      .filter((el) => !targetSet.has(el.id))
+      .slice(0, 24);
+
+    const targetBounds =
+      targetElements.length > 0
+        ? {
+            minX: Math.round(Math.min(...targetElements.map((e) => e.x))),
+            minY: Math.round(Math.min(...targetElements.map((e) => e.y))),
+            maxX: Math.round(Math.max(...targetElements.map((e) => e.x + e.w))),
+            maxY: Math.round(Math.max(...targetElements.map((e) => e.y + e.h))),
+          }
+        : undefined;
+
+    return JSON.stringify({
+      canvas: { width: SLIDE_WIDTH, height: SLIDE_HEIGHT },
+      title: slide.title,
+      background: slide.background,
+      targetBounds,
+      targetElements: targetElements.map(serializeElementSummary),
+      lockedElements: lockedElements.map(serializeElementSummary),
+      hasStylusSketch: slide.strokes.length > 0,
+    });
+  }
 
   return JSON.stringify({
     canvas: { width: SLIDE_WIDTH, height: SLIDE_HEIGHT },
     title: slide.title,
     background: slide.background,
-    elements: clippedElements,
+    elements: slide.elements.slice(0, 24).map(serializeElementSummary),
     hasStylusSketch: slide.strokes.length > 0,
   });
 }
 
-function buildSystemInstruction(mode: AiRequestMode): string {
+function buildSystemInstruction(
+  mode: AiRequestMode,
+  isScopedDesign = false,
+): string {
   if (mode === 'design') {
+    const scopeRules = isScopedDesign
+      ? [
+          '중요(부분 디자인 한정 모드): 사용자가 선택한 `targetElements`(지정된 영역 `targetBounds` 내부)만 디자인을 새로 입히거나 개선하세요.',
+          '`lockedElements`(비선택 요소)는 슬라이드에 그대로 유지되므로 응답 JSON의 `"elements"` 배열에 절대 포함하지 말고, `lockedElements` 영역과 겹치지 않게 `targetBounds` 주변에 배치하세요.',
+          '응답 JSON의 `"elements"`에는 선택된 요소들을 대체할 디자인 요소들만 반환하세요.',
+        ]
+      : [
+          '사용자의 현재 슬라이드 요소, 요청 프롬프트, 첨부된 슬라이드+S-Pen 스케치 이미지를 바탕으로 세련된 새 디자인을 JSON으로만 응답하세요.',
+          '기존 이미지(`type: "image"`)가 있으면 id를 유지해 사라지지 않게 보호하세요.',
+        ];
+
     return [
       '당신은 한국 교육대학원 수업·발표 자료 전문 프레젠테이션 디자이너입니다.',
       `슬라이드 캔버스 크기는 가로 ${SLIDE_WIDTH}px × 세로 ${SLIDE_HEIGHT}px (16:9)입니다.`,
-      '사용자의 현재 슬라이드 요소, 요청 프롬프트, 첨부된 슬라이드+S-Pen 스케치 이미지를 바탕으로 세련된 새 디자인을 JSON으로만 응답하세요.',
-      '기존 이미지(`type: "image"`)가 있으면 id를 유지해 사라지지 않게 보호하세요.',
+      ...scopeRules,
       '반드시 순수 JSON 객체 하나만 반환하세요(마크다운 코드블록 밖 설명 금지). 스키마:',
       '{',
       '  "explanation": "적용한 디자인 컨셉과 변경 요약 (한국어 2~3줄)",',
@@ -381,6 +427,7 @@ function extractJsonObjectText(rawText: string): string | null {
 export function parseDesignPatchFromResponse(
   rawText: string,
   originalSlide: Slide,
+  targetElementIds?: string[],
 ): AiSlideDesignPatch | undefined {
   const jsonText = extractJsonObjectText(rawText);
   if (!jsonText) return undefined;
@@ -392,6 +439,16 @@ export function parseDesignPatchFromResponse(
       background?: Partial<SlideBackground>;
       elements?: Array<Record<string, unknown>>;
     };
+
+    const isScoped = Boolean(targetElementIds && targetElementIds.length > 0);
+    const targetSet = isScoped ? new Set(targetElementIds) : null;
+    const lockedIds = targetSet
+      ? new Set(
+          originalSlide.elements
+            .filter((el) => !targetSet.has(el.id))
+            .map((el) => el.id),
+        )
+      : new Set<string>();
 
     const existingImages = new Map(
       originalSlide.elements
@@ -406,6 +463,9 @@ export function parseDesignPatchFromResponse(
           typeof raw.id === 'string' && raw.id.trim()
             ? raw.id
             : `ai-el-${Date.now()}-${idx}`;
+        if (isScoped && lockedIds.has(id)) {
+          return;
+        }
         const x = clampNumber(raw.x, 12, SLIDE_WIDTH - 40, 48);
         const y = clampNumber(raw.y, 12, SLIDE_HEIGHT - 32, 48);
         const rawW = raw.w ?? raw.width;
@@ -549,7 +609,7 @@ export function parseDesignPatchFromResponse(
 
     return {
       title: typeof parsed.title === 'string' ? parsed.title : undefined,
-      background: normalizedBg,
+      background: isScoped ? undefined : normalizedBg,
       elements: sanitizedElements.length > 0 ? sanitizedElements : undefined,
       explanation:
         typeof parsed.explanation === 'string' && parsed.explanation.trim()
@@ -607,6 +667,7 @@ export interface RunAiParams {
   mode: AiRequestMode;
   prompt: string;
   slide: Slide;
+  targetElementIds?: string[];
   deckOutline?: string;
   slideSnapshotDataUrl?: string;
   history: AiChatMessage[];
@@ -622,6 +683,7 @@ export async function runSlideAiRequest(params: RunAiParams): Promise<AiRunResul
     mode,
     prompt,
     slide,
+    targetElementIds,
     deckOutline,
     slideSnapshotDataUrl,
     history,
@@ -662,13 +724,22 @@ export async function runSlideAiRequest(params: RunAiParams): Promise<AiRunResul
         text: m.content.slice(0, 240),
       }));
 
+    const isScopedDesign =
+      mode === 'design' && Boolean(targetElementIds && targetElementIds.length > 0);
+
     const userContext = [
-      `[요청 모드]: ${mode === 'design' ? '슬라이드 디자인 생성/수정' : '내용 요약 및 논리 피드백'}`,
+      `[요청 모드]: ${
+        isScopedDesign
+          ? `선택된 요소(${targetElementIds?.length ?? 0}개) 한정 디자인 수정`
+          : mode === 'design'
+            ? '슬라이드 전체 디자인 생성/수정'
+            : '내용 요약 및 논리 피드백'
+      }`,
       `[사용자 요청]: ${prompt.slice(0, 1000)}`,
       mode === 'feedback' && deckOutline
         ? `[전체 발표 목차 요약]:\n${deckOutline}`
         : '',
-      `[현재 슬라이드 구조 JSON]:\n${summarizeSlideForPrompt(slide)}`,
+      `[현재 슬라이드 구조 JSON]:\n${summarizeScopedSlideForPrompt(slide, isScopedDesign ? targetElementIds : undefined)}`,
       recentHistory.length > 0
         ? `[이전 대화 요약]:\n${recentHistory.map((h) => `${h.role}: ${h.text}`).join('\n')}`
         : '',
@@ -676,7 +747,7 @@ export async function runSlideAiRequest(params: RunAiParams): Promise<AiRunResul
       .filter(Boolean)
       .join('\n\n');
 
-    const systemInstruction = buildSystemInstruction(mode);
+    const systemInstruction = buildSystemInstruction(mode, isScopedDesign);
 
     if (provider === 'google') {
       const candidateModels = Array.from(
@@ -694,6 +765,7 @@ export async function runSlideAiRequest(params: RunAiParams): Promise<AiRunResul
         slideSnapshotDataUrl,
         mode,
         slide,
+        targetElementIds: isScopedDesign ? targetElementIds : undefined,
         signal: combinedSignal,
         onStatus,
         onChunk,
@@ -718,7 +790,13 @@ export async function runSlideAiRequest(params: RunAiParams): Promise<AiRunResul
         text,
         modelUsed: modelId,
         designPatch:
-          mode === 'design' ? parseDesignPatchFromResponse(text, slide) : undefined,
+          mode === 'design'
+            ? parseDesignPatchFromResponse(
+                text,
+                slide,
+                isScopedDesign ? targetElementIds : undefined,
+              )
+            : undefined,
       };
     }
 
@@ -739,7 +817,13 @@ export async function runSlideAiRequest(params: RunAiParams): Promise<AiRunResul
       text,
       modelUsed: modelId,
       designPatch:
-        mode === 'design' ? parseDesignPatchFromResponse(text, slide) : undefined,
+        mode === 'design'
+          ? parseDesignPatchFromResponse(
+              text,
+              slide,
+              isScopedDesign ? targetElementIds : undefined,
+            )
+          : undefined,
     };
   } catch (err) {
     if (budgetTimedOut && !signal.aborted) {
@@ -777,6 +861,7 @@ async function runGeminiWithFallback(args: {
   slideSnapshotDataUrl?: string;
   mode: AiRequestMode;
   slide: Slide;
+  targetElementIds?: string[];
   signal: AbortSignal;
   onStatus: (status: AiStreamStatus, detail?: string) => void;
   onChunk: (partialText: string) => void;
@@ -789,6 +874,7 @@ async function runGeminiWithFallback(args: {
     slideSnapshotDataUrl,
     mode,
     slide,
+    targetElementIds,
     signal,
     onStatus,
     onChunk,
@@ -909,7 +995,11 @@ async function runGeminiWithFallback(args: {
 
         const designPatch =
           mode === 'design'
-            ? parseDesignPatchFromResponse(accumulatedText, slide)
+            ? parseDesignPatchFromResponse(
+                accumulatedText,
+                slide,
+                targetElementIds,
+              )
             : undefined;
 
         if (mode === 'design' && !designPatch) {
@@ -953,7 +1043,11 @@ async function runGeminiWithFallback(args: {
         if (accumulatedText.trim().length > 0) {
           const partialPatch =
             mode === 'design'
-              ? parseDesignPatchFromResponse(accumulatedText, slide)
+              ? parseDesignPatchFromResponse(
+                  accumulatedText,
+                  slide,
+                  targetElementIds,
+                )
               : undefined;
           if (mode === 'design' && !partialPatch) {
             if (attempt < maxAttempts - 1) {
